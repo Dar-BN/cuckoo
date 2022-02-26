@@ -2,6 +2,7 @@
 # This file is part of Cuckoo Sandbox - http://www.cuckoosandbox.org
 # See the file 'docs/LICENSE' for copying permission.
 
+import json
 import os
 import time
 import logging
@@ -85,7 +86,8 @@ QEMU_ARGS = {
         "cmdline": [
             "qemu-system-x86_64", "-display", "none", "-m", "{memory}",
             "-hda", "{snapshot_path}",
-            "-net", "tap,ifname=tap_{vmname},script=no,downscript=no", "-net", "nic,macaddr={mac}",  # this by default needs /etc/qemu-ifup to add the tap to the bridge, slightly awkward
+            #"-net", "tap,ifname=tap_{vmname},script=no,downscript=no", "-net", "nic,macaddr={mac}",  # this by default needs /etc/qemu-ifup to add the tap to the bridge, slightly awkward
+            "-netdev", "tap,id=net0,ifname=tap_{vmname},script=no,downscript=no", "-device", "rtl8139,netdev=net0,mac={mac}",  # this by default needs /etc/qemu-ifup to add the tap to the bridge, slightly awkward
         ],
         "params": {
             "memory": "1024M",
@@ -156,7 +158,7 @@ class QEMU(Machinery):
             # qcow2 with backing file
             try:
                 proc = subprocess.Popen([
-                    self.qemu_img, "create", "-f", "qcow2",
+                    self.qemu_img, "create", "-f", "qcow2", "-F", "qcow2",
                     "-b", vm_options.image, snapshot_path
                 ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 output, err = proc.communicate()
@@ -167,9 +169,65 @@ class QEMU(Machinery):
                     "QEMU failed starting the machine: %s" % e
                 )
 
+        mi = os.path.join(os.path.dirname(vm_options.image), "machineinfo.json")
+        cmdline = []
+        if os.path.exists(mi):
+            try:
+                mi_dict = dict()
+                with open(mi, 'r') as fp:
+                    mi_dict = json.load(fp)
+                machine = mi_dict.get("machine", None)
+                if machine is not None:
+                    start_args = machine.get("start_args", None)
+                    if start_args is not None:
+                        new_start_args = []
+                        skip_one = False
+                        for arg in start_args:
+                            if skip_one:
+                                skip_one = False
+                                continue
+
+                            # Replace %DISPOSABLE_DISK_PATH% with {snapshot_path}
+                            arg = arg.replace("%DISPOSABLE_DISK_PATH%", "{snapshot_path}")
+
+                            # Replace netdev with tap config
+                            if arg == "-netdev":
+                                new_start_args.extend([
+                                    "-netdev",
+                                     "tap,id=net_{vmname},ifname=tap_{vmname},script=no,downscript=no"])
+                                skip_one = True
+                                continue
+
+                            # Skip audio (seems to hang VM)
+                            if arg == "-soundhw":
+                                skip_one = True
+                                continue
+
+                            # Change device netdev to "netdev=net_{vmname},mac={mac}"
+                            if "netdev=" in arg:
+                                fields = arg.split(',')
+                                new_arg = []
+                                for field in fields:
+                                    if field.startswith("netdev="):
+                                        new_arg.append("netdev=net_{vmname}")
+                                    elif field.startswith("mac="):
+                                        new_arg.append("mac={mac}")
+                                    else:
+                                        new_arg.append(field)
+                                arg = ",".join(new_arg)
+
+                            new_start_args.append(arg)
+                        cmdline = ["qemu-system-x86_64"]
+                        cmdline.extend(new_start_args)
+            except Exception as ex:
+                raise CuckooMachineError(
+                    "Failed to parse machineinfo file: %s (%s)" % (mi, ex))
+
         vm_arch = getattr(vm_options, "arch", "default")
         arch_config = dict(QEMU_ARGS[vm_arch])
-        cmdline = arch_config["cmdline"]
+        if not cmdline:
+            # Didn't managed to parse from machineinfo.json, so fall-back
+            cmdline = arch_config["cmdline"]
         params = dict(QEMU_ARGS["default"]["params"])
         params.update(QEMU_ARGS[vm_arch]["params"])
 
@@ -197,6 +255,8 @@ class QEMU(Machinery):
             final_cmdline.append("-enable-kvm")
 
         log.debug("Executing QEMU %r", final_cmdline)
+        with open("/tmp/a.sh", "w") as fp:
+            fp.write(" ".join(final_cmdline))
 
         try:
             proc = subprocess.Popen(final_cmdline, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
