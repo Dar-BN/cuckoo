@@ -14,19 +14,25 @@ import asyncio
 
 from .log import CuckooGlobalLogger
 
+
 class IPCError(Exception):
     pass
+
 
 class NotConnectedError(IPCError):
     pass
 
+
 class ConnectionTimeoutError(IPCError):
     pass
+
 
 class ResponseTimeoutError(IPCError):
     pass
 
+
 log = CuckooGlobalLogger(__name__)
+
 
 class ReaderWriter(object):
     # 5 MB JSON blob
@@ -432,6 +438,7 @@ def timeout_read_response(client, timeout):
 
         waited += 1
         time.sleep(1)
+
 
 def request_unix_socket(sock_path, message_dict, timeout=0):
     """Send the given message dict to the provided unix socket, wait for a
