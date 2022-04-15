@@ -5,6 +5,7 @@
 
 import logging
 import os
+import re
 import time
 
 from cuckoo.common.abstracts import Processing
@@ -58,10 +59,12 @@ except NameError as e:
         )
     raise
 
+
 def s(o):
     if isinstance(o, obj.NoneObject):
         return None
     return str(o)
+
 
 class VolatilityAPI(object):
     """ Volatility API interface."""
@@ -960,6 +963,7 @@ class VolatilityAPI(object):
 
         return dict(config={}, data=results)
 
+
 class VolatilityManager(object):
     """Handle several volatility results."""
     PLUGINS = [
@@ -1015,7 +1019,8 @@ class VolatilityManager(object):
                 return False
 
         if not config("memory:%s:enabled" % plugin_name):
-            log.debug("Skipping '%s' volatility module", plugin_name)
+            log.debug("Skipping '%s' volatility module (%s)", plugin_name,
+                      self.memfile)
             return False
 
         if plugin_name not in self.vol.plugins:
@@ -1035,8 +1040,16 @@ class VolatilityManager(object):
             if not self.enabled(plugin_name, profiles):
                 continue
 
-            log.debug("Executing volatility '%s' module.", plugin_name)
-            results[plugin_name] = getattr(self.vol, plugin_name)()
+            log.debug("Executing volatility '%s' module (%s)",
+                      plugin_name, self.memfile)
+            try:
+                results[plugin_name] = getattr(self.vol, plugin_name)()
+            except Exception as ex:
+                log.error("Volatlity plugin '%s' on "
+                          "file %s caused exception: %s",
+                          plugin_name, self.memfile, ex
+                          )
+                log.exception(ex)
 
         self.find_taint(results)
         self.cleanup()
@@ -1078,14 +1091,33 @@ class VolatilityManager(object):
                     self.memfile
                 )
 
+
 class Memory(Processing):
     """Volatility Analyzer."""
 
-    def run(self):
+    def run_volatility(self, dump_path):
         """Run analysis.
         @return: volatility results dict.
         """
+        osprofile = (
+            self.machine.get("osprofile") or
+            config("memory:basic:guest_profile")
+        )
+
+        try:
+            return VolatilityManager(dump_path, osprofile).run()
+        except CuckooOperationalError as e:
+            log.error(
+                "Error running Volatility on machine '%s': %s",
+                (self.machine.get("name") or "unknown VM name"), e
+            )
+
+    def run(self):
+        """Run analysis.
+        @return: structured results.
+        """
         self.key = "memory"
+        results = []
 
         if not HAVE_VOLATILITY:
             log.error(
@@ -1095,29 +1127,70 @@ class Memory(Processing):
             )
             return
 
+        # Run on any memsnaps found
+        if os.path.exists(self.memsnaps_path):
+            for dmp in os.listdir(self.memsnaps_path):
+                if not dmp.endswith(".dmp"):
+                    continue
+
+                dump_path = os.path.join(self.memsnaps_path, dmp)
+
+                if not os.path.getsize(dump_path):
+                    log.error(
+                        "VM memory dump empty: %s", dump_path)
+
+                try:
+                    ts_result = self.run_volatility(dump_path)
+                    results.append(ts_result)
+
+                    tstamp, = map(int, re.findall("(\\d+)", dmp))
+                    with open("/tmp/vol-%s.json" % tstamp, "w+") as fp:
+                        import json
+                        json.dump(results, fp)
+                except CuckooOperationalError as e:
+                    pass
+
+        # Run also on final dump
         if not self.memory_path or not os.path.exists(self.memory_path):
             log.error(
-                "VM memory dump not found: to create VM memory dumps you "
-                "have to enable memory_dump in cuckoo.conf!"
+                "Final VM memory dump not found: to create VM memory dumps you"
+                " have to enable memory_dump in cuckoo.conf!"
             )
-            return
-
-        if not os.path.getsize(self.memory_path):
+        elif not os.path.getsize(self.memory_path):
             log.error(
-                "VM memory dump empty: to properly create VM memory dumps "
-                "you have to enable memory_dump in cuckoo.conf!"
+                "Final VM memory dump empty: to properly create VM memory "
+                "dumps you have to enable memory_dump in cuckoo.conf!"
             )
-            return
+        else:
+            try:
+                final_result = self.run_volatility(self.memory_path)
+                results.append(final_result)
 
-        osprofile = (
-            self.machine.get("osprofile") or
-            config("memory:basic:guest_profile")
-        )
+                with open("/tmp/vol-final.json", "w+") as fp:
+                    import json
+                    json.dump(results, fp)
+            except CuckooOperationalError as e:
+                pass
 
-        try:
-            return VolatilityManager(self.memory_path, osprofile).run()
-        except CuckooOperationalError as e:
-            log.error(
-                "Error running Volatility on machine '%s': %s",
-                (self.machine.get("name") or "unknown VM name"), e
-            )
+        merged_result = dict()
+        for entry in results:
+            for modname in entry:
+                for key in entry.get(modname):
+                    if merged_result.get(modname, None) is None:
+                        merged_result[modname] = dict()
+                    if type(entry.get(modname).get(key)) == list:
+                        if merged_result[modname].get(key, None) is None:
+                            merged_result[modname][key] = \
+                                entry.get(modname).get(key)[:]
+                        else:
+                            merged_result[modname][key].extend(
+                                entry.get(modname).get(key))
+                    elif type(entry.get(modname).get(key)) == dict:
+                        if merged_result[modname].get(key, None) is None:
+                            merged_result[modname][key] = \
+                                entry.get(modname).get(key).copy()
+                        else:
+                            merged_result[modname][key].update(
+                                entry.get(modname).get(key))
+
+        return merged_result

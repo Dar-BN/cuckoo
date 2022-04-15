@@ -294,6 +294,9 @@ class Config(object):
             "__star__": ("virtualbox", "machines"),
         },
         "auxiliary": {
+            "memorysnaps": {
+                "enabled": Boolean(True),
+            },
             "sniffer": {
                 "enabled": Boolean(True),
                 "tcpdump": Path(

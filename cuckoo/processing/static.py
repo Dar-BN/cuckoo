@@ -271,24 +271,28 @@ class PortableExecutable(object):
         ret = []
         p7 = M2Crypto.SMIME.PKCS7(pkcs7_obj)
         for cert in p7.get0_signers(M2Crypto.X509.X509_Stack()) or []:
-            subject = cert.get_subject()
-            ret.append({
-                "serial_number": "%032x" % cert.get_serial_number(),
-                "common_name": subject.CN,
-                "country": subject.C,
-                "locality": subject.L,
-                "organization": subject.O,
-                "email": subject.Email,
-                "sha1": "%040x" % int(cert.get_fingerprint("sha1"), 16),
-                "md5": "%032x" % int(cert.get_fingerprint("md5"), 16),
-            })
+            try:
+                subject = cert.get_subject()
+                ret.append({
+                    "serial_number": "%032x" % cert.get_serial_number(),
+                    "common_name": subject.CN,
+                    "country": subject.C,
+                    "locality": subject.L,
+                    "organization": subject.O,
+                    "email": subject.Email,
+                    "sha1": "%040x" % int(cert.get_fingerprint("sha1"), 16),
+                    "md5": "%032x" % int(cert.get_fingerprint("md5"), 16),
+                })
 
-            if subject.GN and subject.SN:
-                ret[-1]["full_name"] = "%s %s" % (subject.GN, subject.SN)
-            elif subject.GN:
-                ret[-1]["full_name"] = subject.GN
-            elif subject.SN:
-                ret[-1]["full_name"] = subject.SN
+                if subject.GN and subject.SN:
+                    ret[-1]["full_name"] = "%s %s" % (subject.GN, subject.SN)
+                elif subject.GN:
+                    ret[-1]["full_name"] = subject.GN
+                elif subject.SN:
+                    ret[-1]["full_name"] = subject.SN
+            except Exception as ex:
+                log.error("Exception processing X.509 cert")
+                log.exception(ex)
 
         return ret
 

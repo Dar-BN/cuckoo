@@ -38,6 +38,10 @@ latest_symlink_lock = threading.Lock()
 active_analysis_count = 0
 
 
+def get_machinery():
+    return machinery
+
+
 class AnalysisManager(threading.Thread):
     """Analysis Manager.
 

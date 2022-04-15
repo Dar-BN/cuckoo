@@ -2,17 +2,17 @@
 # See the file 'LICENSE' for copying permission.
 
 import errno
-import os
-import socket
-import json
-import select
-import time
-import stat
 import grp
+import json
+import logging
+import os
+import select
+import socket
+import stat
+import time
 
-import asyncio
 
-from .log import CuckooGlobalLogger
+log = logging.getLogger(__name__)
 
 
 class IPCError(Exception):
@@ -29,9 +29,6 @@ class ConnectionTimeoutError(IPCError):
 
 class ResponseTimeoutError(IPCError):
     pass
-
-
-log = CuckooGlobalLogger(__name__)
 
 
 class ReaderWriter(object):
@@ -51,7 +48,8 @@ class ReaderWriter(object):
 
             if len(self.rcvbuf) >= self.MAX_INFO_BUF:
                 raise ValueError(
-                    f"Received message exceeds {self.MAX_INFO_BUF} bytes"
+                    "Received message exceeds {0} bytes".format(
+                        self.MAX_INFO_BUF)
                 )
 
             try:
@@ -65,8 +63,9 @@ class ReaderWriter(object):
             if not buf:
                 if self.has_buffered():
                     raise EOFError(
-                        f"Last byte must be '\\n'. "
-                        f"Actual last byte is: {repr(self.rcvbuf[:1])}"
+                        "Last byte must be '\\n'. "
+                        "Actual last byte is: {0}".format
+                        (repr(self.rcvbuf[:1]))
                     )
 
                 raise NotConnectedError(
@@ -97,7 +96,7 @@ class ReaderWriter(object):
         return json.loads(message)
 
     def send_json_message(self, mes_dict):
-        self.sock.sendall(f"{json.dumps(mes_dict)}\n".encode())
+        self.sock.sendall("{0}\n".format(json.dumps(mes_dict)).encode())
 
     def close(self):
         try:
@@ -108,7 +107,7 @@ class ReaderWriter(object):
 
 
 _POLL_READREADY = select.POLLIN | select.POLLPRI
-_POLL_CLOSABLE = select.POLLHUP | select.POLLRDHUP | select.POLLERR | \
+_POLL_CLOSABLE = select.POLLHUP | select.POLLERR | \
                  select.POLLNVAL
 _POLL_READ = _POLL_READREADY | _POLL_CLOSABLE
 
@@ -131,8 +130,8 @@ class UnixSocketServer:
             sock.bind(self.sock_path)
         except socket.error as e:
             raise IPCError(
-                f"Failed to bind to unix socket path {self.sock_path}. "
-                f"Error: {e}"
+                "Failed to bind to unix socket path {sp}. "
+                "Error: {e}".format(sp=self.sock_path, e=e)
             )
 
         self.sock = sock
@@ -147,8 +146,10 @@ class UnixSocketServer:
                 group = grp.getgrnam(owner_group)
             except KeyError:
                 raise IPCError(
-                    f"Cannot change group of socket {self.sock_path}."
-                    f" Group {owner_group} does not exist."
+                    "Cannot change group of socket {sp}."
+                    " Group {owner_group} does not exist.".format(
+                        sp=self.sock_path,
+                        owner_group=owner_group)
                 )
             try:
                 os.chown(self.sock_path, 0, group.gr_gid)
@@ -158,8 +159,11 @@ class UnixSocketServer:
                 )
             except OSError as e:
                 raise IPCError(
-                    f"Failed to change group to {owner_group} "
-                    f"of socket {self.sock_path}. {e}"
+                    "Failed to change group to {owner_group} "
+                    "of socket {self.sock_path}. {e}".format(
+                        sp=self.sock_path,
+                        owner_group=owner_group)
+
                 )
 
         sock.listen(backlog)
@@ -273,7 +277,8 @@ class UnixSocketServer:
                     # connection is reset or closed.
                     self.untrack(sock, fd=fd)
                 else:
-                    raise IPCError(f"Unhandled poll bitmask: {bitmask}")
+                    raise IPCError("Unhandled poll bitmask: {0}".format(
+                        bitmask))
 
     def cleanup(self):
         if self.do_run:
@@ -334,9 +339,10 @@ class UnixSockClient:
                 if waited >= timeout:
                     raise ConnectionTimeoutError(
                         "Timeout reached while waiting for socket path "
-                        f"{self.sockpath} to be created. "
-                        f"Waited {waited} seconds."
-                    )
+                        "{sp} to be created. "
+                        "Waited {waited} seconds.".format(
+                            sp=self.sock_path,
+                            waited=waited))
 
                 time.sleep(1)
                 waited += 1
@@ -349,9 +355,10 @@ class UnixSockClient:
             except socket.error as e:
                 if maxtries and tries >= tries:
                     raise IPCError(
-                        f"Failed to connect to unix socket: {self.sockpath}. "
-                        f"Error: {e}"
-                    )
+                        "Failed to connect to unix socket: {sp}. "
+                        "Error: {e}".format(
+                            sp=self.sockpath,
+                            e=e))
 
                 time.sleep(3)
 
@@ -371,8 +378,9 @@ class UnixSockClient:
             self.reader.send_json_message(mes_dict)
         except socket.error as e:
             raise IPCError(
-                f"Failed to send message to {self.sockpath}. Error: {e}"
-            )
+                "Failed to send message to {sp}. Error: {e}".format(
+                        sp=self.sockpath,
+                        e=e))
 
     def recv_json_message(self):
         if not self.sock:
@@ -383,10 +391,11 @@ class UnixSockClient:
         try:
             return self.reader.get_json_message()
         except socket.error as e:
-            raise IPCError(f"Failed to read from socket: {e}")
-
+            raise IPCError("Failed to read from socket: {e}".format(
+                        e=e))
         except json.decoder.JSONDecodeError as e:
-            raise ValueError(f"Received invalid JSON message: {e}")
+            raise ValueError("Received invalid JSON message: {e}".format(
+                        e=e))
 
     def cleanup(self):
         if not self.sock:
@@ -410,16 +419,21 @@ def message_unix_socket(sock_path, message_dict):
     """Send the given message dict to the provided unix socket and
      disconnect"""
     if not os.path.exists(sock_path):
-        raise IPCError(f"Unix socket {sock_path} does not exist")
+        raise IPCError("Unix socket {sp} does not exist".format(
+                        sp=sock_path))
+
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 
     try:
         sock.connect(str(sock_path))
     except socket.error as e:
-        raise IPCError(f"Could not connect to socket: {sock_path}. Error: {e}")
+        raise IPCError("Could not connect to socket: {sp}. Error: {e}".format(
+            sp=sock_path,
+            e=e))
 
-    sock.sendall(f"{json.dumps(message_dict)}\n".encode())
+
+    sock.sendall("{0}\n".format(json.dumps(message_dict)).encode())
     sock.shutdown(socket.SHUT_RDWR)
     sock.close()
 
@@ -433,8 +447,9 @@ def timeout_read_response(client, timeout):
 
         if waited >= timeout:
             raise ResponseTimeoutError(
-                f"No response within timeout of {timeout} seconds."
-            )
+                "No response within timeout of {timeout} seconds.".format(
+                    timeout=timeout
+                ))
 
         waited += 1
         time.sleep(1)
@@ -447,7 +462,7 @@ def request_unix_socket(sock_path, message_dict, timeout=0):
     to wait for the response. If it is reached, a ResponseTimeoutError
     is raised."""
     if not os.path.exists(sock_path):
-        raise IPCError(f"Unix socket {sock_path} does not exist")
+        raise IPCError("Unix socket {sp} does not exist".format(sp=sock_path))
 
     if timeout > 0:
         client = UnixSockClient(sock_path, blockingreads=False)
@@ -464,33 +479,3 @@ def request_unix_socket(sock_path, message_dict, timeout=0):
     finally:
         client.cleanup()
 
-
-async def a_request_unix_socket(sock_path, message_dict):
-    """Asynchronously send the given message to the given unix socket and wait
-     for a response."""
-    try:
-        reader, writer = await asyncio.open_unix_connection(str(sock_path))
-    except FileNotFoundError:
-        raise IPCError(f"Unix socket {sock_path} does not exist")
-
-    try:
-        writer.write(f"{json.dumps(message_dict)}\n".encode())
-        await writer.drain()
-    except OSError as e:
-        raise IPCError(
-            f"Failed to send message to socket: {sock_path}. Error: {e}"
-        )
-
-    try:
-        data = await reader.readuntil(separator=b"\n")
-        writer.close()
-    except OSError as e:
-        raise IPCError(
-            f"Failed to read message from socket: {sock_path}. Error: {e}"
-        )
-    except EOFError as e:
-        raise IPCError(
-            f"Unexpected end of message from socket: {sock_path}. Error: {e}"
-        )
-
-    return json.loads(data.decode())
