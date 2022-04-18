@@ -531,7 +531,8 @@ class QEMU(Machinery):
                 qmp = self.qmp[name]
                 qmp.execute('query-migrate-parameters')
                 qmp.execute('migrate-set-parameters',
-                            {'ramsnap-mode': True})
+                            {'ramsnap-mode': True,
+                             'ramsnap-period-ms': 10})
                 qmp.execute('migrate-set-parameters',
                             {'max-bandwidth': 5 * 2 ** 30})  # 5Gb
                 qmp.execute('query-migrate-parameters')

@@ -129,14 +129,6 @@ class RamSnapTrigger(threading.Thread):
                     log.debug("RamSnapTrigger: machine not running...")
                     continue
 
-                #log.info("task = %s", my_dir(self.memsnaps.task))
-                #log.info("machine = %s",
-                #         my_dir(self.memsnaps.machine))
-                #log.info("guest_manager = %s",
-                #         my_dir(self.memsnaps.guest_manager))
-                #log.info("options = %s",
-                #         my_dir(self.memsnaps.options))
-
                 # Start migration capture process
                 if self.capture_proc is None:
                     cmd = ["/usr/bin/qemu-capture-migration"]
@@ -147,8 +139,10 @@ class RamSnapTrigger(threading.Thread):
 
                     log.info("Running: %s", " ".join(cmd))
                     self.capture_proc = BackgroundPopen(
-                        BackgroundPopen.prefix_handler(log.debug, "(stdout) capture: "),
-                        BackgroundPopen.prefix_handler(log.debug, "(stderr) capture: "),
+                        BackgroundPopen.prefix_handler(log.debug,
+                                                       "(stdout) capture: "),
+                        BackgroundPopen.prefix_handler(log.debug,
+                                                       "(stderr) capture: "),
                         cmd, close_fds=True)
 
                 # Ask Qemu to start sending data
