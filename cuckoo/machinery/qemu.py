@@ -141,16 +141,15 @@ class QMPClient(object):
     def execute(self, command, args_dict=None):
         with self._lock:
             try:
-                log.debug("QMP Executing: %r", {
-                    "execute": command,
-                    "arguments": args_dict or {}
-                })
-                self._client.send_json_message({
-                    "execute": command,
-                    "arguments": args_dict or {}
-                })
-                res = timeout_read_response(self._client, timeout=60)
+                msg = {"execute": command}
+                if args_dict:
+                    msg["arguments"] = args_dict
+
+                log.debug("QMP Executing: %r", msg)
+                self._client.send_json_message(msg)
+                res = timeout_read_response(self._client, timeout=5)
                 log.debug("QMP Execution Response: %r", res)
+                return res
             except IPCError as e:
                 raise QMPError(
                     "Failed to send command to QMP socket. "
@@ -161,7 +160,7 @@ class QMPClient(object):
                     )
                 )
 
-    def read(self, timeout=60):
+    def read(self, timeout=5):
         with self._lock:
             try:
                 return timeout_read_response(self._client, timeout=timeout)
@@ -170,23 +169,34 @@ class QMPClient(object):
                     "Failed to read response from QMP socket. {e}".format(e=e)
                 )
 
-    def wait_read_return(self, timeout=60):
+    def wait_read_return(self, timeout=5):
         with self._lock:
             start = time.time()
             while True:
-                mes = self.read(timeout=timeout)
+                msg = self.read(timeout=timeout)
                 # Skip all messages that do not have the return key.
-                ret = mes.get("return")
-                if ret:
+                log.error("DPK: Got msg = %s", msg)
+                ret = msg.get("return", None)
+                log.error("DPK: ret (return) = %s", ret)
+                if ret is not None:
                     return ret
+
+                err = msg.get("error", None)
+                log.error("DPK: ret (error) = %s", ret)
+                if err is not None:
+                    raise QMPError("Error: %s - %s",
+                                   err.get("class", "UNKNOWN"),
+                                   err.get("desc", "?????"))
 
                 if time.time() - start >= timeout:
                     raise QMPError("Timeout waiting for return")
 
     def query_status(self):
         with self._lock:
-            self.execute("query-status")
-            status = self.wait_read_return()["status"]
+            status = None
+            ret = self.execute("query-status").get("return", None)
+            if ret is not None:
+                status = ret.get("status")
             log.debug("Got QMP status: %r", status)
             return status
 
@@ -194,24 +204,27 @@ class QMPClient(object):
         # Connect and perform 'capabilities handshake'. Must be performed
         # before any commands can be sent.
         with self._lock:
-            self._client_obj = UnixSockClient(self._sockpath)
-            self._client_obj.connect(maxtries=1, timeout=20)
-            try:
-                res = timeout_read_response(self._client_obj, timeout=60)
-                log.debug("Got QMP response: %r", res)
-            except IPCError as e:
-                raise QMPError(
-                    "Failure while waiting for QMP "
-                    "connection header. {e}".format(e=e)
-                )
+            if self._client_obj is None:
+                self._client_obj = UnixSockClient(self._sockpath)
+                self._client_obj.connect(maxtries=1, timeout=20)
+                try:
+                    res = timeout_read_response(self._client_obj, timeout=5)
+                    log.debug("Got QMP response: %r", res)
+                except IPCError as e:
+                    raise QMPError(
+                        "Failure while waiting for QMP "
+                        "connection header. {e}".format(e=e)
+                    )
 
-            if not res.get("QMP"):
-                raise QMPError(
-                    "Unexpected QMP connection "
-                    "header. Header: {res}".format(res=res)
-                )
+                if not res.get("QMP"):
+                    raise QMPError(
+                        "Unexpected QMP connection "
+                        "header. Header: {res}".format(res=res)
+                    )
 
-            self.execute("qmp_capabilities")
+                self.execute("qmp_capabilities")
+
+        return True
 
     def close(self):
         self._client.cleanup()
@@ -441,9 +454,10 @@ class QEMU(Machinery):
 
         self.state[vm_info.name] = None
 
-        qmp = self.qmp[vm_info.name]
-        qmp.close()
-        self.qmp[vm_info.name] = None
+        qmp = self.qmp.get(vm_info.name, None)
+        if qmp is not None:
+            qmp.close()
+            self.qmp[vm_info.name] = None
 
         qmp_socket_path = self.qmp_socket_paths[vm_info.name]
         self.qmp_socket_paths[vm_info.name] = None
@@ -455,9 +469,12 @@ class QEMU(Machinery):
         @return: status string.
         """
         try:
-            qmp = self.qmp[name]
+            qmp = self.qmp.get(name, None)
+            if qmp is None:
+                return self.STOPPED
             vm_status = qmp.query_status()
-        except QMPError:
+        except QMPError as err:
+            log.error("Exception: %s", err)
             vm_status = None
 
         p = self.state.get(name, None)
@@ -472,13 +489,53 @@ class QEMU(Machinery):
         """
         log.debug("Dumping memory for machine: %s to %s", name, path)
 
+        dump_size = 2 ** 30  # 1Gb
+
         try:
             if name in self.qmp:
                 qmp = self.qmp[name]
-                qmp.execute('pmemsave',
-                            {'val': 0,
-                             'size': 2 ** 30,  # 1Gb
-                             'filename': path})
+                res = qmp.execute('pmemsave',
+                                  {'val': 0,
+                                   'size': dump_size,
+                                   'filename': path})
+                log.debug("pmemsave returned: %s", res)
+            else:
+                log.debug("Machine %s doesn't have QMP socket,"
+                          " no memory dump done", name)
+
+            tries = 0
+            while not os.path.exists(path) and tries < 10:
+                time.sleep(1)
+                tries += 1
+            if tries >= 10:
+                raise CuckooMachineError("Failed to start memory dump")
+
+            tries = 0
+            stat = os.stat(path)
+            while stat.st_size < dump_size and tries < 20:
+                time.sleep(1)
+                stat = os.stat(path)
+                tries += 1
+            if tries >= 20:
+                raise CuckooMachineError("Incomplete memory dump")
+        except QMPError as e:
+            raise CuckooMachineError("Error dumping memory virtual machine "
+                                     "{0}: {1}".format(name, e))
+
+    def start_migration(self, name, socket_path):
+        log.debug("Starting memory migration for machine: %s on socket %s",
+                  name, socket_path)
+
+        try:
+            if name in self.qmp:
+                qmp = self.qmp[name]
+                qmp.execute('query-migrate-parameters')
+                qmp.execute('migrate-set-parameters',
+                            {'ramsnap-mode': True})
+                qmp.execute('migrate-set-parameters',
+                            {'max-bandwidth': 5 * 2 ** 30})  # 5Gb
+                qmp.execute('query-migrate-parameters')
+                qmp.execute('migrate', {'uri': socket_path})
             else:
                 log.debug("Machine %s doesn't have QMP socket,"
                           " no memory dump done", name)

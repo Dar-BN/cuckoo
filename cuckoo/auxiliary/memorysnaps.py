@@ -1,7 +1,9 @@
 import logging
 import os
+import subprocess
 import threading
 import time
+import tempfile
 
 from pprint import pformat
 
@@ -20,6 +22,27 @@ def my_dir(obj):
         return pformat(dir(obj))
     else:
         return "<None>"
+
+
+class BackgroundPopen(subprocess.Popen):
+    @staticmethod
+    def prefix_handler(log_fn, prefix):
+        return lambda line: log_fn("%s%s", prefix, line)
+
+    @staticmethod
+    def _proxy_lines(pipe, handler):
+        with pipe:
+            for line in pipe:
+                handler(line)
+
+    def __init__(self, out_handler, err_handler, *args, **kwargs):
+        kwargs['stdout'] = subprocess.PIPE
+        kwargs['stderr'] = subprocess.PIPE
+        super(self.__class__, self).__init__(*args, **kwargs)
+        threading.Thread(target=self._proxy_lines,
+                         args=[self.stdout, out_handler]).start()
+        threading.Thread(target=self._proxy_lines,
+                         args=[self.stderr, err_handler]).start()
 
 
 class SnapTrigger(threading.Thread):
@@ -71,14 +94,116 @@ class SnapTrigger(threading.Thread):
             time.sleep(20)
 
 
+class RamSnapTrigger(threading.Thread):
+
+    def __init__(self, memsnaps):
+        threading.Thread.__init__(self)
+        self.memsnaps = memsnaps
+        self.done = False
+        self.capture_proc = None
+        self.socket_path = tempfile.mktemp(prefix='.mig', suffix='.sock')
+        self.store_dir = cwd("storage", "analyses",
+                             str(self.memsnaps.task.id),
+                             "ramsnaps")
+
+    @property
+    def storage_dir(self):
+        if not os.path.exists(self.store_dir):
+            os.mkdir(self.store_dir)
+
+        return self.store_dir
+
+    def run(self):
+
+        started_migration = False
+
+        while not self.done:
+            try:
+                time.sleep(3)
+
+                log.info("RamSnapTrigger: state=%s; dir=%s",
+                         self.memsnaps.machine_running(),
+                         self.storage_dir)
+
+                if not self.memsnaps.machine_running():
+                    log.debug("RamSnapTrigger: machine not running...")
+                    continue
+
+                #log.info("task = %s", my_dir(self.memsnaps.task))
+                #log.info("machine = %s",
+                #         my_dir(self.memsnaps.machine))
+                #log.info("guest_manager = %s",
+                #         my_dir(self.memsnaps.guest_manager))
+                #log.info("options = %s",
+                #         my_dir(self.memsnaps.options))
+
+                # Start migration capture process
+                if self.capture_proc is None:
+                    cmd = ["/usr/bin/qemu-capture-migration"]
+                    # if logging.getLogger().level <= logging.DEBUG:
+                    #     cmd.append("-D")
+                    cmd.extend(["-s", self.socket_path])
+                    cmd.extend(["-o", self.store_dir])
+
+                    log.info("Running: %s", " ".join(cmd))
+                    self.capture_proc = BackgroundPopen(
+                        BackgroundPopen.prefix_handler(log.debug, "(stdout) capture: "),
+                        BackgroundPopen.prefix_handler(log.debug, "(stderr) capture: "),
+                        cmd, close_fds=True)
+
+                # Ask Qemu to start sending data
+                if not started_migration and self.memsnaps.machinery:
+                    if os.path.exists(self.socket_path):
+                        # log.info("machinery = %s",
+                        #          my_dir(self.memsnaps.machinery))
+                        log.info("Starting migraiton for %s, on socket %s",
+                                 self.memsnaps.machine.label, self.socket_path)
+
+                        self.memsnaps.machinery.start_migration(
+                            self.memsnaps.machine.label,
+                            "unix:" + self.socket_path)
+                        started_migration = True
+                    else:
+                        log.info("Migration socket doesn't exist yet: %s",
+                                 self.socket_path)
+            except Exception as ex:
+                log.error("Exception: %s", ex)
+                log.exception(ex)
+
+        if self.capture_proc is not None:
+            self.capture_proc.kill()
+            self.capture_proc.wait()
+            self.capture_proc = None
+
+
 class MemorySnaps(Auxiliary):
     def __init__(self):
         Auxiliary.__init__(self)
         self.thread = None
+        self._machinery = get_machinery()
+
+    @property
+    def machinery(self):
+        if self._machinery is None:
+            self._machinery = get_machinery()
+
+        return self._machinery
 
     def machine_running(self):
         try:
-            status = self.guest_manager.get("/status", timeout=5).json()
+            status = self.machinery._status(self.machine.label)
+            log.info("Machine %s status: %s", self.machine.label, status)
+            if status == self.machinery.RUNNING:
+                return True
+            else:
+                return False
+        except Exception as e:
+            log.error("Virtual machine /status failed. %s", e)
+            return False
+
+        try:
+            # status = self.guest_manager.get("/status", timeout=5).json()
+            status = self.guest_manager._status(self.machine.label)
             log.info("Got status: %s", pformat(status))
         except CuckooGuestError:
             # this might fail due to timeouts or just temporary network
@@ -109,7 +234,8 @@ class MemorySnaps(Auxiliary):
     def start(self):
 
         try:
-            self.thread = SnapTrigger("test", self)
+            self.thread = RamSnapTrigger(self)
+            # self.thread = SnapTrigger("test", self)
             self.thread.start()
 
         except (OSError, ValueError):
@@ -139,4 +265,4 @@ class MemorySnaps(Auxiliary):
             self.thread.done = True
             self.thread.join()
         except Exception as e:
-            log.exception("Unable to stop the SnapTrigger thread: %s", e)
+            log.exception("Unable to stop the RamSnapTrigger thread: %s", e)
