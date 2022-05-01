@@ -216,13 +216,13 @@ class UnixSocketServer:
         while True:
             try:
                 msg = reader.get_json_message()
-            except (socket.error, ValueError, EOFError,
-                    json.decoder.JSONDecodeError) as e:
+            except (socket.error, EOFError, ValueError) as e:
 
                 # Do not log the error if the connection was (uncleanly)
                 # closed. This can happen if we close it after a bad message
                 # or the client only sends a command and disconnects.
-                if e.errno not in (errno.EBADF, errno.ECONNRESET):
+                if hasattr(e, 'errno') and e.errno not in (errno.EBADF,
+                                                           errno.ECONNRESET):
                     log.exception(
                         "Failed to read message. Disconnecting "
                         "client.", error=e, sock=sock
@@ -341,7 +341,7 @@ class UnixSockClient:
                         "Timeout reached while waiting for socket path "
                         "{sp} to be created. "
                         "Waited {waited} seconds.".format(
-                            sp=self.sock_path,
+                            sp=self.sockpath,
                             waited=waited))
 
                 time.sleep(1)
@@ -393,7 +393,7 @@ class UnixSockClient:
         except socket.error as e:
             raise IPCError("Failed to read from socket: {e}".format(
                         e=e))
-        except json.decoder.JSONDecodeError as e:
+        except ValueError as e:
             raise ValueError("Received invalid JSON message: {e}".format(
                         e=e))
 

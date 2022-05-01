@@ -1144,11 +1144,19 @@ class Memory(Processing):
                     results.append(ts_result)
 
                     tstamp, = map(int, re.findall("(\\d+)", dmp))
-                    with open("/tmp/vol-%s.json" % tstamp, "w+") as fp:
+                    with open(os.path.join(self.memsnaps_path,
+                                           "vol-%05d.json" % tstamp),
+                              "w+") as fp:
                         import json
-                        json.dump(results, fp)
-                except CuckooOperationalError as e:
-                    pass
+                        json.dump(ts_result, fp)
+                except exc.AddrSpaceError as ex:
+                    log.error(
+                        "VM memory dump has invalid address space: %s (%s)",
+                        dump_path, ex)
+                except CuckooOperationalError as ex:
+                    log.error(
+                        "VM memory dump caused and exception: %s (%s)",
+                        dump_path, ex)
 
         # Run also on final dump
         if not self.memory_path or not os.path.exists(self.memory_path):
@@ -1166,16 +1174,18 @@ class Memory(Processing):
                 final_result = self.run_volatility(self.memory_path)
                 results.append(final_result)
 
-                with open("/tmp/vol-final.json", "w+") as fp:
+                with open(os.path.join(os.path.dirname(self.memory_path),
+                                       "vol-final.json"),
+                          "w+") as fp:
                     import json
-                    json.dump(results, fp)
+                    json.dump(final_result, fp)
             except CuckooOperationalError as e:
                 pass
 
         merged_result = dict()
         for entry in results:
-            for modname in entry:
-                for key in entry.get(modname):
+            for modname in entry or []:
+                for key in entry.get(modname, []):
                     if merged_result.get(modname, None) is None:
                         merged_result[modname] = dict()
                     if type(entry.get(modname).get(key)) == list:

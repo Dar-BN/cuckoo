@@ -573,6 +573,8 @@ class Config(object):
             },
             "memory": {
                 "enabled": Boolean(False),
+                "ramsnap": Boolean(False),
+                "frequency": Int(20),
             },
             "misp": {
                 "enabled": Boolean(False),

@@ -206,7 +206,25 @@ class QMPClient(object):
         with self._lock:
             if self._client_obj is None:
                 self._client_obj = UnixSockClient(self._sockpath)
-                self._client_obj.connect(maxtries=1, timeout=20)
+                count = 0
+                connected = False
+                while count < 10:
+                    try:
+                        self._client_obj.connect(maxtries=1, timeout=20)
+                        connected = True
+                        break
+                    except IPCError as e:
+                        log.warning("Failure to connect to QMP socket."
+                                    " (try {c}) {e}".format(c=count+1, e=e))
+                        time.sleep(1)
+                    finally:
+                        count += 1
+
+                if not connected:
+                    raise QMPError(
+                        "Failure to connect to QMP socket."
+                        " (try {c})".format(c=count))
+
                 try:
                     res = timeout_read_response(self._client_obj, timeout=5)
                     log.debug("Got QMP response: %r", res)

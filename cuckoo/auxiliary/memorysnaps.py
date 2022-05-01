@@ -55,6 +55,7 @@ class SnapTrigger(threading.Thread):
         self.store_dir = cwd("storage", "analyses",
                              str(self.memsnaps.task.id),
                              "memsnaps")
+        self.freq = memsnaps.frequency
 
     @property
     def storage_dir(self):
@@ -91,7 +92,7 @@ class SnapTrigger(threading.Thread):
             except Exception as ex:
                 log.error("Exception: %s", ex)
                 log.exception(ex)
-            time.sleep(20)
+            time.sleep(self.freq)
 
 
 class RamSnapTrigger(threading.Thread):
@@ -175,6 +176,7 @@ class MemorySnaps(Auxiliary):
         Auxiliary.__init__(self)
         self.thread = None
         self._machinery = get_machinery()
+        self._output_dir = None
 
     @property
     def machinery(self):
@@ -186,18 +188,16 @@ class MemorySnaps(Auxiliary):
     def machine_running(self):
         try:
             status = self.machinery._status(self.machine.label)
-            log.info("Machine %s status: %s", self.machine.label, status)
-            if status == self.machinery.RUNNING:
-                return True
-            else:
+            log.info("Machine %s QMP status: %s", self.machine.label, status)
+            if status != self.machinery.RUNNING:
                 return False
         except Exception as e:
-            log.error("Virtual machine /status failed. %s", e)
+            log.error("Virtual machine QMP status failed. %s", e)
             return False
 
         try:
-            # status = self.guest_manager.get("/status", timeout=5).json()
-            status = self.guest_manager._status(self.machine.label)
+            status = self.guest_manager.get("/status", timeout=5).json()
+            # status = self.guest_manager._status(self.machine.label)
             log.info("Got status: %s", pformat(status))
         except CuckooGuestError:
             # this might fail due to timeouts or just temporary network
@@ -225,11 +225,42 @@ class MemorySnaps(Auxiliary):
         log.info("Got status: %s", pformat(status))
         return True
 
+    @property
+    def is_ramsnap(self):
+        _rv = self.task and self.task.options and \
+            self.task.options.get("ramsnap", 'no') == 'yes'
+        log.debug("is_ramsnap: %s", _rv)
+
+        return _rv
+
+    @property
+    def frequency(self):
+        _rv = 20
+
+        try:
+            val = "<not specified>"
+            if self.task and self.task.options:
+                val = self.task.options.get("frequency", 20)
+                _rv = int(val)
+                _rv = max(1, min(60, _rv))
+        except ValueError as ex:
+            log.error("Error processing frequency value: %s (%s)",
+                      val, ex)
+
+        log.debug("frequency: %d", _rv)
+        return _rv
+
     def start(self):
 
         try:
-            self.thread = RamSnapTrigger(self)
-            # self.thread = SnapTrigger("test", self)
+            log.debug("DPK: %s",
+                      str(self.task.options) if self.task else 'None')
+            if self.is_ramsnap:
+                self.thread = RamSnapTrigger(self)
+            else:
+                self.thread = SnapTrigger("periodic-dump", self)
+
+            self._output_dir = self.thread.store_dir
             self.thread.start()
 
         except (OSError, ValueError):
@@ -260,3 +291,28 @@ class MemorySnaps(Auxiliary):
             self.thread.join()
         except Exception as e:
             log.exception("Unable to stop the RamSnapTrigger thread: %s", e)
+
+        if self.is_ramsnap:
+            memsnaps_dir = cwd("storage", "analyses",
+                            str(self.task.id),
+                            "memsnaps")
+            # Now need to generate dump that volatility can read
+            cmd = ["/usr/bin/qemu-process-ramsnaps"]
+            # if logging.getLogger().level <= logging.DEBUG:
+            #     cmd.append("-D")
+
+            cmd.extend(["-i", os.path.join(self._output_dir, "pc-ram.idx")])
+            cmd.extend(["-p", os.path.join(memsnaps_dir, "memory-dump")])
+            # cmd.extend(["-g", "3"])
+            cmd.extend(["-m", "30"])
+
+            log.info("Running: %s", " ".join(cmd))
+
+            dump_gen_proc = BackgroundPopen(
+                BackgroundPopen.prefix_handler(log.debug,
+                                                "(stdout) dump-gen: "),
+                BackgroundPopen.prefix_handler(log.debug,
+                                                "(stderr) dump-gen: "),
+                cmd, close_fds=True)
+
+            dump_gen_proc.wait()
