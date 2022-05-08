@@ -486,17 +486,17 @@ class QEMU(Machinery):
         @param name: virtual machine name.
         @return: status string.
         """
+
+        vm_status = None
         try:
             qmp = self.qmp.get(name, None)
-            if qmp is None:
-                return self.STOPPED
-            vm_status = qmp.query_status()
+            if qmp is not None:
+                vm_status = qmp.query_status()
         except QMPError as err:
             log.error("Exception: %s", err)
-            vm_status = None
 
         p = self.state.get(name, None)
-        if p is not None and vm_status is not None:
+        if p is not None or vm_status is not None:
             return self.RUNNING
 
         return self.STOPPED
